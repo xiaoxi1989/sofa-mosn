@@ -89,6 +89,8 @@ type ClusterSnapshot interface {
 
 	LoadBalancer() LoadBalancer
 
+	HostNum() int
+
 	IsExistsHosts(metadata MetadataMatchCriteria) bool
 }
 

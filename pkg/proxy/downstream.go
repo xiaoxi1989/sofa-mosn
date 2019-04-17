@@ -609,10 +609,10 @@ func (s *downStream) receiveHeaders(endStream bool) {
 
 	// `downstream` implement loadbalancer ctx
 	log.DefaultLogger.Tracef("before initializeUpstreamConnectionPool")
-	pool, err := s.initializeUpstreamConnectionPool(s)
+	pool := s.getConnectionPool()
 
-	if err != nil {
-		log.DefaultLogger.Errorf("initialize Upstream Connection Pool error, request can't be proxyed,error = %v", err)
+	if pool == nil {
+		log.DefaultLogger.Errorf("getConnectionPool error, request can't be proxyed")
 		return
 	}
 
@@ -798,6 +798,64 @@ func (s *downStream) onPerReqTimeout() {
 	}
 }
 
+func (s *downStream) getConnectionPool() types.ConnectionPool {
+	var pool types.ConnectionPool
+	var err error
+	var waitTime = time.Millisecond
+
+	pool, err = s.getActiveConnectionPool(s.snapshot.HostNum())
+	if pool != nil {
+		return pool
+	}
+
+	if err != nil {
+		goto failed
+	}
+
+	// perhaps the first request, wait for tcp handshaking. total wait time: 1ms + 10ms + 100ms + 1000ms
+	for i := 0; i < 4; i++ {
+		time.Sleep(waitTime)
+		pool, err = s.getActiveConnectionPool(1)
+		if pool != nil {
+			return pool
+		}
+		if err != nil {
+			goto failed
+		}
+		waitTime *= 10
+	}
+
+failed:
+	// no health upstream host.
+	log.DefaultLogger.Debugf("%s getConnectionPool failed: %v", s.cluster.Name(), err)
+	s.requestInfo.SetResponseFlag(types.NoHealthyUpstream)
+	s.sendHijackReply(types.NoHealthUpstreamCode, s.downstreamReqHeaders)
+	return nil
+}
+
+func (s *downStream) getActiveConnectionPool(num int) (types.ConnectionPool, error) {
+	var pool types.ConnectionPool
+	var err error
+	// maybe choose the same host if RandomLB
+	hosts := s.snapshot.HostNum()
+	if num > hosts {
+		num = hosts
+	}
+	if num == 0 {
+		num = 1
+	}
+	for i := 0; i < num; i++ {
+		pool, err = s.initializeUpstreamConnectionPool(s)
+		if err != nil {
+			return nil, err
+		}
+		if pool.Active(s.context) {
+			return pool, nil
+		}
+	}
+	return nil, err
+}
+
 func (s *downStream) initializeUpstreamConnectionPool(lbCtx types.LoadBalancerContext) (types.ConnectionPool, error) {
 	var connPool types.ConnectionPool
 
@@ -806,9 +864,6 @@ func (s *downStream) initializeUpstreamConnectionPool(lbCtx types.LoadBalancerCo
 	connPool = s.proxy.clusterManager.ConnPoolForCluster(lbCtx, s.snapshot, currentProtocol)
 
 	if connPool == nil {
-		s.requestInfo.SetResponseFlag(types.NoHealthyUpstream)
-		s.sendHijackReply(types.NoHealthUpstreamCode, s.downstreamReqHeaders)
-
 		return nil, fmt.Errorf("no healthy upstream in cluster %s", s.cluster.Name())
 	}
 

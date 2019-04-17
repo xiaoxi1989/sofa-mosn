@@ -354,6 +354,8 @@ type ConnectionPool interface {
 
 	NewStream(ctx context.Context, receiver StreamReceiveListener, listener PoolEventListener)
 
+	Active(ctx context.Context) bool
+
 	Close()
 }
 

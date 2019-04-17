@@ -21,12 +21,20 @@ import (
 	"context"
 	"sync"
 	"sync/atomic"
+	"time"
+
+	"github.com/alipay/sofa-mosn/pkg/log"
 	"github.com/alipay/sofa-mosn/pkg/network"
 	"github.com/alipay/sofa-mosn/pkg/protocol"
 	str "github.com/alipay/sofa-mosn/pkg/stream"
 	"github.com/alipay/sofa-mosn/pkg/types"
 	"github.com/rcrowley/go-metrics"
-	"time"
+)
+
+const (
+	Init = iota
+	Connecting
+	Connected
 )
 
 func init() {
@@ -40,7 +48,8 @@ var defaultSubProtocol byte = 0x00
 // activeClient used as connected client
 // host is the upstream
 type connPool struct {
-	activeClients map[byte]*activeClient //sub protocol -> activeClient
+	activeClients sync.Map //sub protocol -> activeClient
+	state         sync.Map
 	host          types.Host
 
 	mux sync.Mutex
@@ -48,10 +57,63 @@ type connPool struct {
 
 // NewConnPool
 func NewConnPool(host types.Host) types.ConnectionPool {
-	return &connPool{
-		activeClients: make(map[byte]*activeClient),
-		host:          host,
+	p := &connPool{
+		host: host,
 	}
+	return p
+}
+
+func (p *connPool) init(sub byte) {
+	p.mux.Lock()
+
+	s, _ := p.state.Load(sub)
+	if s != Init {
+		p.mux.Unlock()
+		return
+	}
+
+	p.state.Store(sub, Connecting)
+	p.mux.Unlock()
+
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.DefaultLogger.Errorf("connPool init panic %v", r)
+			}
+		}()
+
+		active := newActiveClient(context.Background(), sub, p)
+		if active != nil {
+			p.activeClients.Store(sub, active)
+			p.state.Store(sub, Connected)
+		} else {
+			p.state.Store(sub, Init)
+		}
+	}()
+}
+
+func (p *connPool) Active(ctx context.Context) bool {
+	var s int32
+
+	subProtocol := getSubProtocol(ctx)
+
+	v, ok := p.state.Load(subProtocol)
+	if !ok {
+		s = Init
+		p.state.Store(subProtocol, s)
+	} else {
+		s = v.(int32)
+	}
+
+	if s == Connected {
+		return true
+	}
+
+	if s == Init {
+		p.init(subProtocol)
+	}
+
+	return false
 }
 
 func (p *connPool) Protocol() types.Protocol {
@@ -62,19 +124,14 @@ func (p *connPool) NewStream(ctx context.Context,
 	responseDecoder types.StreamReceiveListener, listener types.PoolEventListener) {
 	subProtocol := getSubProtocol(ctx)
 
-	activeClient := func() *activeClient {
-		p.mux.Lock()
-		defer p.mux.Unlock()
-		if p.activeClients[subProtocol] == nil {
-			p.activeClients[subProtocol] = newActiveClient(ctx, subProtocol, p)
-		}
-		return p.activeClients[subProtocol]
-	}()
+	client, _ := p.activeClients.Load(subProtocol)
 
-	if activeClient == nil {
+	if client == nil {
 		listener.OnFailure(types.ConnectionFailure, p.host)
 		return
 	}
+
+	activeClient := client.(*activeClient)
 
 	if !p.host.ClusterInfo().ResourceManager().Requests().CanCreate() {
 		listener.OnFailure(types.Overflow, p.host)
@@ -105,12 +162,13 @@ func (p *connPool) NewStream(ctx context.Context,
 }
 
 func (p *connPool) Close() {
-	p.mux.Lock()
-	defer p.mux.Unlock()
-
-	for _, ac := range p.activeClients {
+	f := func(k, v interface{}) bool {
+		ac, _ := v.(*activeClient)
 		ac.client.Close()
+		return true
 	}
+
+	p.activeClients.Range(f)
 }
 
 func (p *connPool) onConnectionEvent(client *activeClient, event types.ConnectionEvent) {
@@ -144,18 +202,15 @@ func (p *connPool) onConnectionEvent(client *activeClient, event types.Connectio
 		default:
 			// do nothing
 		}
-		p.mux.Lock()
-		p.activeClients[client.subProtocol] = nil
-		p.mux.Unlock()
+		p.activeClients.Delete(client.subProtocol)
+		p.state.Store(client.subProtocol, Init)
 	} else if event == types.ConnectTimeout {
 		p.host.HostStats().UpstreamRequestTimeout.Inc(1)
 		p.host.ClusterInfo().Stats().UpstreamRequestTimeout.Inc(1)
 		client.client.Close()
-		p.activeClients[client.subProtocol] = nil
 	} else if event == types.ConnectFailed {
 		p.host.HostStats().UpstreamConnectionConFail.Inc(1)
 		p.host.ClusterInfo().Stats().UpstreamConnectionConFail.Inc(1)
-		p.activeClients[client.subProtocol] = nil
 	}
 }
 
@@ -214,7 +269,7 @@ func newActiveClient(ctx context.Context, subProtocol byte, pool *connPool) *act
 	}
 
 	data := pool.host.CreateConnection(ctx)
-	connCtx := context.WithValue(context.Background(), types.ContextKeyConnectionID, data.Connection.ID())
+	connCtx := context.WithValue(ctx, types.ContextKeyConnectionID, data.Connection.ID())
 	codecClient := pool.createStreamClient(connCtx, data)
 	codecClient.AddConnectionEventListener(ac)
 	codecClient.SetStreamConnectionEventListener(ac)

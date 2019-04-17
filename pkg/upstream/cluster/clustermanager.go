@@ -51,6 +51,7 @@ type clusterSnapshot struct {
 	loadbalancer types.LoadBalancer
 	value        *rcu.Value
 	config       interface{}
+	num          int
 }
 
 func NewClusterManager(sourceAddr net.Addr, clusters []v2.Cluster,
@@ -103,6 +104,10 @@ func (cs *clusterSnapshot) ClusterInfo() types.ClusterInfo {
 
 func (cs *clusterSnapshot) LoadBalancer() types.LoadBalancer {
 	return cs.loadbalancer
+}
+
+func (cs *clusterSnapshot) HostNum() int {
+	return cs.num
 }
 
 func (cs *clusterSnapshot) IsExistsHosts(metadata types.MetadataMatchCriteria) bool {
@@ -289,6 +294,10 @@ func (cm *clusterManager) GetClusterSnapshot(context context.Context, clusterNam
 			loadbalancer: pcc.Info().LBInstance(),
 			value:        pc.configLock,
 			config:       pc.configLock.Load(),
+		}
+
+		if concretedCluster, ok := pcc.(*simpleInMemCluster); ok {
+			clusterSnapshot.num = len(concretedCluster.hosts)
 		}
 
 		return clusterSnapshot
