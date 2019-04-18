@@ -1343,7 +1343,7 @@ func (s *downStream) waitNotify(id uint32) (phase types.Phase, err error) {
 		return types.End, types.ErrExit
 	}
 
-	s.logger.Debugf("waitNotify begin %p %d", s, s.ID)
+	s.logger.Tracef("waitNotify begin %p %d", s, s.ID)
 	select {
 	case <-s.notify:
 	}

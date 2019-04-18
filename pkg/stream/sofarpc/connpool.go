@@ -64,6 +64,7 @@ func NewConnPool(host types.Host) types.ConnectionPool {
 
 func (p *connPool) init(sub byte) {
 	p.mux.Lock()
+	defer 	p.mux.Unlock()
 
 	v, ok := p.activeClients.Load(sub)
 	if !ok {
@@ -71,12 +72,10 @@ func (p *connPool) init(sub byte) {
 	}
 	client := v.(*activeClient)
 	if client.state != Init {
-		p.mux.Unlock()
 		return
 	}
 
 	client.state = Connecting
-	p.mux.Unlock()
 
 	go func() {
 		defer func() {
@@ -84,6 +83,8 @@ func (p *connPool) init(sub byte) {
 				log.DefaultLogger.Errorf("connPool init panic %v", r)
 			}
 		}()
+
+		log.DefaultLogger.Debugf("connPool init host %s", p.host.AddressString())
 
 		p.mux.Lock()
 		defer p.mux.Unlock()
