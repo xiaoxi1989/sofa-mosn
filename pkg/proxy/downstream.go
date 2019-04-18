@@ -852,6 +852,7 @@ func (s *downStream) getActiveConnectionPool(num int) (types.ConnectionPool, err
 		if pool.Active(s.context) {
 			return pool, nil
 		}
+		log.DefaultLogger.Debugf("%s is no active", s.cluster.Name())
 	}
 	return nil, err
 }

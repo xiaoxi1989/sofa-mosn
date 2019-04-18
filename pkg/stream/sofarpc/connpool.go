@@ -49,7 +49,6 @@ var defaultSubProtocol byte = 0x00
 // host is the upstream
 type connPool struct {
 	activeClients sync.Map //sub protocol -> activeClient
-	state         sync.Map
 	host          types.Host
 
 	mux sync.Mutex
@@ -66,13 +65,17 @@ func NewConnPool(host types.Host) types.ConnectionPool {
 func (p *connPool) init(sub byte) {
 	p.mux.Lock()
 
-	s, _ := p.state.Load(sub)
-	if s != Init {
+	v, ok := p.activeClients.Load(sub)
+	if !ok {
+		return
+	}
+	client := v.(*activeClient)
+	if client.state != Init {
 		p.mux.Unlock()
 		return
 	}
 
-	p.state.Store(sub, Connecting)
+	client.state = Connecting
 	p.mux.Unlock()
 
 	go func() {
@@ -82,34 +85,37 @@ func (p *connPool) init(sub byte) {
 			}
 		}()
 
-		active := newActiveClient(context.Background(), sub, p)
-		if active != nil {
-			p.activeClients.Store(sub, active)
-			p.state.Store(sub, Connected)
+		p.mux.Lock()
+		defer p.mux.Unlock()
+		client := newActiveClient(context.Background(), sub, p)
+		if client != nil {
+			client.state = Connected
+			p.activeClients.Store(sub, client)
 		} else {
-			p.state.Store(sub, Init)
+			p.activeClients.Delete(sub)
 		}
 	}()
 }
 
 func (p *connPool) Active(ctx context.Context) bool {
-	var s int32
+	var client *activeClient
 
 	subProtocol := getSubProtocol(ctx)
 
-	v, ok := p.state.Load(subProtocol)
+	v, ok := p.activeClients.Load(subProtocol)
 	if !ok {
-		s = Init
-		p.state.Store(subProtocol, s)
+		client = &activeClient{}
+		client.state = Init
+		p.activeClients.Store(subProtocol, client)
 	} else {
-		s = v.(int32)
+		client = v.(*activeClient)
 	}
 
-	if s == Connected {
+	if client.state == Connected {
 		return true
 	}
 
-	if s == Init {
+	if client.subProtocol == Init {
 		p.init(subProtocol)
 	}
 
@@ -202,8 +208,9 @@ func (p *connPool) onConnectionEvent(client *activeClient, event types.Connectio
 		default:
 			// do nothing
 		}
+		p.mux.Lock()
 		p.activeClients.Delete(client.subProtocol)
-		p.state.Store(client.subProtocol, Init)
+		p.mux.Unlock()
 	} else if event == types.ConnectTimeout {
 		p.host.HostStats().UpstreamRequestTimeout.Inc(1)
 		p.host.ClusterInfo().Stats().UpstreamRequestTimeout.Inc(1)
@@ -260,6 +267,7 @@ type activeClient struct {
 	host               types.CreateConnectionData
 	closeWithActiveReq bool
 	totalStream        uint64
+	state              uint32
 }
 
 func newActiveClient(ctx context.Context, subProtocol byte, pool *connPool) *activeClient {
