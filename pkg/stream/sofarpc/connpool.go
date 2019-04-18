@@ -63,19 +63,14 @@ func NewConnPool(host types.Host) types.ConnectionPool {
 }
 
 func (p *connPool) init(sub byte) {
-	p.mux.Lock()
-	defer 	p.mux.Unlock()
-
 	v, ok := p.activeClients.Load(sub)
 	if !ok {
 		return
 	}
 	client := v.(*activeClient)
-	if client.state != Init {
+	if !atomic.CompareAndSwapUint32(&client.state, Init, Connecting) {
 		return
 	}
-
-	client.state = Connecting
 
 	go func() {
 		defer func() {
@@ -105,9 +100,16 @@ func (p *connPool) Active(ctx context.Context) bool {
 
 	v, ok := p.activeClients.Load(subProtocol)
 	if !ok {
-		client = &activeClient{}
-		client.state = Init
-		p.activeClients.Store(subProtocol, client)
+		p.mux.Lock()
+		v, ok := p.activeClients.Load(subProtocol)
+        if !ok {
+			client = &activeClient{}
+			client.state = Init
+			p.activeClients.Store(subProtocol, client)
+		} else {
+			client = v.(*activeClient)
+		}
+		p.mux.Unlock()
 	} else {
 		client = v.(*activeClient)
 	}
